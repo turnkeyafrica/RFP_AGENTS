@@ -50,7 +50,7 @@ def setup_chroma_database(qa_df: pd.DataFrame) -> Chroma:
     Set up Chroma database from QA pairs in the Excel file
     """
     qa_texts = [
-        f"Question: {row['Question']}\nAnswer: {row['Answer']}"
+        f"Question: {row['Question']}\n Answer: {row['Answer']}"
         for _, row in qa_df.iterrows()
     ]
     
@@ -98,7 +98,6 @@ async def main():
     try:
         qa_df = pd.read_excel(qa_database_file)
         
-        # Try to load existing database, if not exists, create new one
         try:
             vectorstore = load_chroma_database()
             print("Loaded existing Chroma database")
@@ -122,7 +121,6 @@ async def main():
     try:
         results = await executor.execute_rfp_processing(
             questions=rfp_questions,
-            qa_database_path=qa_database_file,
             vectorstore=vectorstore
         )
         
@@ -132,8 +130,8 @@ async def main():
             print("\nGenerated Sub-questions:")
             for j, question in enumerate(result['sub_questions'], 1):
                 print(f"{j}. {question}")
-            print("\nFinal Answer:")
-            print(result['final_answer'])
+            print("\n Final Answer:")
+            print(result['final_response'])
             if result['recommendations']:
                 print("\nRecommendations for Improvement:")
                 for rec in result['recommendations']:

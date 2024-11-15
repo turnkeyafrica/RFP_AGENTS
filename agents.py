@@ -61,7 +61,7 @@ class Generate3QuestionsAgent(BaseAgent):
             goal="Generate specific sub-questions from RFP questions",
             backstory="Expert at breaking down complex RFP questions into specific, answerable components",
             max_iter=2,
-            max_tokens=2000
+            max_tokens=1500
         )
 
     async def execute(self, task: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -107,10 +107,8 @@ class LookupAgent(BaseAgent):
         
         all_answers = {}
         for question in questions:
-            # Use Chroma's similarity search
             results = vectorstore.similarity_search_with_score(question, k=2)
             
-            # Format the results
             formatted_answers = []
             for doc, score in results:
                 truncated_answer = truncate_text(doc.page_content, 300)
@@ -132,32 +130,32 @@ class AuditAgent(BaseAgent):
         super().__init__(llm)
         self.config = AgentConfig(
             role="Answer Quality Auditor",
-            goal="Validate answers and provide recommendations for RFP questions",
+            goal="Validate answers and use them to write a Response to the question",
             backstory="Expert at evaluating answer quality and relevance to original questions",
             max_iter=2,
-            max_tokens=4800
+            max_tokens=4000
         )
 
     async def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         original_question = task.get('original_question')
         answers = task.get('answers')
         
+        filtered_answers = self._filter_best_answers(answers)
+        
         prompt = f"""
-        You are evaluating answers for this RFP question:
+        Evaluate these answers for the RFP question:
         Original Question: {original_question}
 
-        Review these sub-questions and their answers:
-        {self._format_answers(answers)}
+        Available answers:
+        {self._format_answers(filtered_answers)}
         
-        Your task is to:
-        1. Evaluate the relevance and completeness of the answers
-        2. Combine the most relevant points to create a comprehensive response
-        3. Provide specific recommendations if any important aspects are not adequately addressed
+        Tasks:
+        1. Create a comprehensive response combining the most relevant information (about 6 sentences)
+        2. List any missing aspects that need more information
 
-
-        Format your response exactly as follows:
-        COMPREHENSIVE_ANSWER: [Provide a well-structured answer combining the best elements in 2-3 sentences]
-        RECOMMENDATIONS: [If any aspects need improvement, list specific recommendations. If none needed, write "None required"]
+        Format:
+        COMPREHENSIVE_ANSWER: [Your response]
+        RECOMMENDATIONS: [List missing aspects or write "None required" if complete]
         """
         
         response = await self.get_completion(prompt)
@@ -165,46 +163,59 @@ class AuditAgent(BaseAgent):
         
         return {
             'original_question': original_question,
-            'final_answer': evaluation['comprehensive_answer'],
+            'final_response': evaluation['comprehensive_answer'],
             'recommendations': evaluation['recommendations'],
             'sub_questions': list(answers.keys()),
-            'all_answers': answers
+            'all_answers': filtered_answers
         }
 
+    def _filter_best_answers(self, answers: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter to keep only the most relevant answers based on similarity score"""
+        filtered = {}
+        for question, answer_list in answers.items():
+            # Sort by similarity score and keep only the best answer
+            sorted_answers = sorted(answer_list, 
+                                 key=lambda x: x['similarity_score'], 
+                                 reverse=True)
+            filtered[question] = sorted_answers[:1] 
+        return filtered
+
     def _parse_evaluation(self, response: str) -> Dict[str, Any]:
-        """Parse the evaluation response"""
-        lines = response.split('\n')
-        evaluation = {
+        sections = {
             'comprehensive_answer': '',
             'recommendations': []
         }
         
         current_section = None
-        for line in lines:
+        for line in response.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+                
             if line.startswith('COMPREHENSIVE_ANSWER:'):
                 current_section = 'comprehensive_answer'
-                evaluation['comprehensive_answer'] = line.replace('COMPREHENSIVE_ANSWER:', '').strip()
+                sections['comprehensive_answer'] = line.replace('COMPREHENSIVE_ANSWER:', '').strip()
             elif line.startswith('RECOMMENDATIONS:'):
                 current_section = 'recommendations'
                 recommendations = line.replace('RECOMMENDATIONS:', '').strip()
-                evaluation['recommendations'] = [r.strip() for r in recommendations.split(',') if r.strip()]
+                sections['recommendations'] = [r.strip() for r in recommendations.split(',') if r.strip()]
+            elif current_section == 'comprehensive_answer':
+                sections['comprehensive_answer'] += ' ' + line
                 
-        return evaluation
+        return sections
 
     def _format_answers(self, answers: Dict[str, Any]) -> str:
-        """Format answers for the audit prompt"""
+        """Format answers concisely for the audit prompt"""
         formatted = []
         for question, answer_list in answers.items():
-            formatted.append(f"\nSub-question: {question}")
-            formatted.append("Answers:")
-            for i, answer_data in enumerate(answer_list, 1):
-                formatted.append(f"{i}. {answer_data['answer']}")
-                formatted.append(f"   Similarity Score: {answer_data['similarity_score']:.3f}")
-                
-        return "\n".join(formatted)
-    
+            formatted.append(f"\nQ: {question}")
+            for answer_data in answer_list:
+                formatted.append(f"A: {answer_data['answer']}")
+                formatted.append(f"Score: {answer_data['similarity_score']:.2f}")
+        return "\n".join(formatted)   
+     
 class AgentExecutor:
-    async def execute_rfp_processing(self, questions: List[str], qa_database_path: str, 
+    async def execute_rfp_processing(self, questions: List[str], 
                                    vectorstore: Chroma) -> List[Dict[str, Any]]:
         generate_agent = Generate3QuestionsAgent()
         lookup_agent = LookupAgent()
@@ -222,7 +233,6 @@ class AgentExecutor:
                 lookup_task = {
                     'original_question': question,
                     'sub_questions': sub_questions['sub_questions'],
-                    'qa_database_path': qa_database_path,
                     'vectorstore': vectorstore
                 }
                 answers = await lookup_agent.execute(lookup_task)
@@ -231,7 +241,6 @@ class AgentExecutor:
                 audit_task = {
                     'original_question': question,
                     'answers': answers['answers'],
-                    'qa_database_path': qa_database_path,
                     'vectorstore': vectorstore
                 }
                 final_result = await audit_agent.execute(audit_task)
@@ -244,5 +253,4 @@ class AgentExecutor:
         return results
 
     async def shutdown(self):
-        # Cleanup code if needed
         pass
